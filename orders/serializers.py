@@ -1,7 +1,13 @@
+import time
+import logging
+
+from django.core.cache import cache
 from django.db import transaction
 from rest_framework import serializers
 
 from orders.models import Order, OrderItem, Product
+
+logger = logging.getLogger(__name__)
 
 
 class OrderItemInputSerializer(serializers.Serializer):
@@ -59,41 +65,63 @@ class OrderCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Order must have at least one item")
         return value
 
-    @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop("items")
-        order = Order.objects.create(**validated_data)
-
         product_ids = [item["product_id"] for item in items_data]
-        products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
 
-        for item_data in items_data:
-            product = products[item_data["product_id"]]
-            quantity = item_data["quantity"]
+        locks_acquired = []
 
-            if product.stock_quantity < quantity:
-                raise serializers.ValidationError(
-                    f"Not enough stock for {product.name}. "
-                    f"Available: {product.stock_quantity}, Requested: {quantity}"
-                )
+        try:
+            for product_id in product_ids:
+                lock_key = f"product_lock:{product_id}"
+                lock = cache.lock(lock_key, timeout=10, blocking_timeout=5)
 
-        total = 0
-        for item_data in items_data:
-            product = products[item_data["product_id"]]
-            quantity = item_data["quantity"]
-            price = product.price
+                acquired = lock.acquire(blocking=True)
+                if not acquired:
+                    raise serializers.ValidationError(
+                        "Product is currently being ordered. Please try again."
+                    )
+                locks_acquired.append(lock)
 
-            OrderItem.objects.create(
-                order=order, product=product, quantity=quantity, price=price
-            )
-            total += price * quantity
+            with transaction.atomic():
+                products = {p.id: p for p in Product.objects.filter(id__in=product_ids)}
 
-        order.total = total
-        product.stock_quantity -= quantity
-        product.save()
+                for item_data in items_data:
+                    product = products[item_data["product_id"]]
+                    quantity = item_data["quantity"]
 
-        order.save()
-        return order
+                    if product.stock_quantity < quantity:
+                        raise serializers.ValidationError(
+                            f"Not enough stock for {product.name}. "
+                            f"Available: {product.stock_quantity}, Requested: {quantity}"
+                        )
+
+                order = Order.objects.create(**validated_data)
+
+                total = 0
+                for item_data in items_data:
+                    product = products[item_data["product_id"]]
+                    quantity = item_data["quantity"]
+                    price = product.price
+
+                    product.stock_quantity -= quantity
+                    product.save()
+
+                    OrderItem.objects.create(
+                        order=order, product=product, quantity=quantity, price=price
+                    )
+                    total += price * quantity
+
+                order.total = total
+                order.save()
+                return order
+
+        finally:
+            for lock in locks_acquired:
+                try:
+                    lock.release()
+                except Exception as e:
+                    logger.error(f"Error releasing lock: {e}")
 
 
 class ProductSerializer(serializers.ModelSerializer):
