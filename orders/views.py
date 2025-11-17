@@ -1,67 +1,64 @@
-from rest_framework import viewsets, permissions
+from rest_framework.views import APIView, status
 from rest_framework.response import Response
-from rest_framework.decorators import action
-from django.db import transaction
+from rest_framework.permissions import IsAuthenticated
 
-from .models import Product, Order, OrderItem
-from .serializers import ProductSerializer, OrderSerializer, OrderItemSerializer
+from django.shortcuts import get_object_or_404
 
-
-class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.filter(is_active=True)
-    serializer_class = ProductSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
-
-    def perform_destroy(self, instance):
-        instance.is_active = False
-        instance.save()
+from orders import serializers
+from orders.models import Order, OrderItem, Product
 
 
-class OrderViewSet(viewsets.ModelViewSet):
-    serializer_class = OrderSerializer
-    permission_classes = [permissions.IsAuthenticated]
+class OrderAPIView(APIView):
+    serializer_class = serializers.OrderSerializer
+    permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        user = self.request.user
-        if user.is_staff:
-            return (
-                Order.objects.all()
-                .select_related("user")
-                .prefetch_related("items__product")
+    def get(self, request, order_id=None):
+        if order_id:
+            order = get_object_or_404(Order, id=order_id, user=request.user)
+            serializer = serializers.OrderSerializer(order)
+            return Response(status=status.HTTP_200_OK, data=serializer.data)
+
+        orders = Order.objects.filter(user=request.user)
+        serializer = self.serializer_class(orders, many=True)
+        return Response(status=status.HTTP_200_OK, data=serializer.data)
+
+    def post(self, request):
+        serializer = serializers.OrderCreateSerializer(
+            data=request.data, context={"request": request}
+        )
+        if serializer.is_valid():
+            order = serializer.save(user=request.user)
+            return Response(
+                serializers.OrderSerializer(order).data, status=status.HTTP_201_CREATED
             )
-        return (
-            Order.objects.filter(user=user)
-            .select_related("user")
-            .prefetch_related("items__product")
-        )
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
-
-    @action(detail=True, methods=["post"], url_path="update-status")
-    def update_status(self, request, pk=None):
-        order = self.get_object()
-        new_status = request.data.get("status")
-        if new_status not in dict(Order.STATUS_CHOICES):
-            return Response({"error": "Invalid status"}, status=400)
-        order.status = new_status
-        order.save(update_fields=["status"])
-        return Response(OrderSerializer(order, context={"request": request}).data)
+        return Response(status=status.HTTP_400_BAD_REQUEST, data=serializer.errors)
 
 
-class OrderItemViewSet(viewsets.ModelViewSet):
-    serializer_class = OrderItemSerializer
-    permission_classes = [permissions.IsAuthenticated]
+class OrderItemAPIView(APIView):
+    serializer_class = serializers.OrderItemSerializer
 
-    def get_queryset(self):
-        user = self.request.user
-        if user.is_staff:
-            return OrderItem.objects.all().select_related("order", "product")
-        return OrderItem.objects.filter(order__user=user).select_related(
-            "order", "product"
-        )
+    def get(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id, user=request.user)
+        items = order.items.all()
+        serializer = self.serializer_class(items, many=True)
+        return Response(status=status.HTTP_200_OK, data=serializer.data)
 
-    @transaction.atomic
-    def perform_create(self, serializer):
-        serializer.save()
-        serializer.instance.order.calculate_total()
+
+class ProductAPIView(APIView):
+    serializer_class = serializers.ProductSerializer
+
+    def get(self, request, product_id=None):
+        if product_id:
+            product = get_object_or_404(Product, id=product_id)
+            serializer = self.serializer_class(product)
+            return Response(status=status.HTTP_200_OK, data=serializer.data)
+        products = Product.objects.all()
+        serializer = serializers.ProductSerializer(products, many=True)
+        return Response(status=status.HTTP_200_OK, data=serializer.data)
+
+    def post(self, request):
+        serializer = serializers.ProductSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(status=status.HTTP_201_CREATED, data=serializer.data)
+        return Response(status=status.HTTP_400_BAD_REQUEST, data=serializer.errors)
