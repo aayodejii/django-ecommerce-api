@@ -1,13 +1,16 @@
+from django.shortcuts import get_object_or_404
+from django.core.cache import cache
 from rest_framework.views import APIView, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from django.shortcuts import get_object_or_404
-from django.core.cache import cache
+from django_ratelimit.decorators import ratelimit
+from django.utils.decorators import method_decorator
 
 from orders import serializers
 from orders.models import Order, OrderItem, Product
 
 
+@method_decorator(ratelimit(key="user", rate="5/m", method="POST"), name="post")
 class OrderAPIView(APIView):
     serializer_class = serializers.OrderSerializer
     permission_classes = [IsAuthenticated]
