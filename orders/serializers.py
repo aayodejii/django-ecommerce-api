@@ -1,4 +1,3 @@
-import time
 import logging
 
 from django.core.cache import cache
@@ -6,6 +5,7 @@ from django.db import transaction
 from rest_framework import serializers
 
 from orders.models import Order, OrderItem, Product
+from orders.tasks import send_order_confirmation_email
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,9 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
                 order.total = total
                 order.save()
+
+                send_order_confirmation_email.delay(order.id)
+
                 return order
 
         finally:
