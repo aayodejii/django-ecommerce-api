@@ -1,13 +1,17 @@
+import uuid
+
 from django.shortcuts import get_object_or_404
 from django.core.cache import cache
 from rest_framework.views import APIView, status
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from django_ratelimit.decorators import ratelimit
 from django.utils.decorators import method_decorator
 
 from orders import serializers
 from orders.models import Order, OrderItem, Product
+from orders.tasks import process_payment_webhook
 
 
 @method_decorator(ratelimit(key="user", rate="5/m", method="POST"), name="post")
@@ -73,3 +77,23 @@ class ProductAPIView(APIView):
             serializer.save()
             return Response(status=status.HTTP_201_CREATED, data=serializer.data)
         return Response(status=status.HTTP_400_BAD_REQUEST, data=serializer.errors)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def payment_webhook(request):
+    data = request.data
+
+    event_id = data.get("event_id", str(uuid.uuid4()))
+    payment_reference = data.get("reference")
+    payment_status = data.get("status")
+    amount = data.get("amount")
+
+    if not all([payment_reference, payment_status, amount]):
+        return Response(
+            {"error": "Missing required fields"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    process_payment_webhook.delay(event_id, payment_reference, payment_status, amount)
+
+    return Response({"message": "Webhook received"}, status=status.HTTP_200_OK)

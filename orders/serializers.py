@@ -1,3 +1,4 @@
+import uuid
 import logging
 
 from django.core.cache import cache
@@ -48,7 +49,17 @@ class OrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Order
-        fields = ["id", "user", "total", "status", "created_at", "updated_at", "items"]
+        fields = [
+            "id",
+            "user",
+            "total",
+            "status",
+            "payment_status",
+            "payment_reference",
+            "created_at",
+            "updated_at",
+            "items",
+        ]
         read_only_fields = ["id", "total", "created_at", "updated_at", "user"]
 
 
@@ -96,7 +107,10 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                             f"Available: {product.stock_quantity}, Requested: {quantity}"
                         )
 
-                order = Order.objects.create(**validated_data)
+                payment_reference = f"ORD-{uuid.uuid4().hex[:12].upper()}"
+                order = Order.objects.create(
+                    **validated_data, payment_reference=payment_reference
+                )
 
                 total = 0
                 for item_data in items_data:

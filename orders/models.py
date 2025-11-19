@@ -36,12 +36,32 @@ class Order(models.Model):
         (STATUS_RETURNED, "Returned"),
         (STATUS_FAILED, "Failed"),
     ]
+
+    PAYMENT_PENDING = "pending"
+    PAYMENT_PAID = "paid"
+    PAYMENT_FAILED = "failed"
+
+    PAYMENT_STATUS_CHOICES = [
+        (PAYMENT_PENDING, "Pending"),
+        (PAYMENT_PAID, "Paid"),
+        (PAYMENT_FAILED, "Failed"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="orders"
     )
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING
+    )
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PAYMENT_STATUS_CHOICES,
+        default=PAYMENT_PENDING,
+        db_index=True,
+    )
+    payment_reference = models.CharField(
+        max_length=255, unique=True, null=True, blank=True
     )
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -96,3 +116,18 @@ class EmailLog(models.Model):
 
     class Meta:
         unique_together = ["order", "email_type"]
+
+
+class WebhookEvent(models.Model):
+    event_id = models.CharField(max_length=255, unique=True)
+    event_type = models.CharField(max_length=50)
+    payload = models.JSONField()
+    processed = models.BooleanField(default=False)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["event_id"]),
+            models.Index(fields=["processed"]),
+        ]
