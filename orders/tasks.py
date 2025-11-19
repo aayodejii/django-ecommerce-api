@@ -3,7 +3,9 @@ import logging
 from celery import shared_task
 from django.conf import settings
 from django.core.mail import send_mail
-from orders.models import Order
+from django.db import IntegrityError
+
+from orders.models import EmailLog, Order
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,12 @@ def send_order_confirmation_email(self, order_id):
             .prefetch_related("items__product")
             .get(id=order_id)
         )
+
+        try:
+            EmailLog.objects.create(order=order, email_type="order_confirmation")
+        except IntegrityError:
+            logger.info(f"Email already sent for order {order_id}, skipping")
+            return f"Email already sent for order {order_id}"
 
         items_text = "\n".join(
             [

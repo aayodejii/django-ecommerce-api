@@ -85,3 +85,14 @@ class OrderItem(models.Model):
     @property
     def subtotal(self):
         return self.price * self.quantity
+
+
+class EmailLog(models.Model):
+    order = models.ForeignKey(
+        Order, on_delete=models.CASCADE, related_name="email_logs"
+    )
+    email_type = models.CharField(max_length=50)
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ["order", "email_type"]
