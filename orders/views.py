@@ -1,8 +1,8 @@
 from rest_framework.views import APIView, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-
 from django.shortcuts import get_object_or_404
+from django.core.cache import cache
 
 from orders import serializers
 from orders.models import Order, OrderItem, Product
@@ -52,9 +52,17 @@ class ProductAPIView(APIView):
             product = get_object_or_404(Product, id=product_id)
             serializer = self.serializer_class(product)
             return Response(status=status.HTTP_200_OK, data=serializer.data)
-        products = Product.objects.all()
-        serializer = serializers.ProductSerializer(products, many=True)
-        return Response(status=status.HTTP_200_OK, data=serializer.data)
+
+        cache_key = "priduct_list"
+        product_data = cache.get(cache_key)
+
+        if product_data is None:
+            products = Product.objects.filter(is_active=True)
+            serializer = serializers.ProductSerializer(products, many=True)
+            product_data = serializer.data
+            cache.set(cache_key, product_data, timeout=300)
+
+        return Response(status=status.HTTP_200_OK, data=product_data)
 
     def post(self, request):
         serializer = serializers.ProductSerializer(data=request.data)
