@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "django_celery_beat",
     "djoser",
     "users",
     "orders",
@@ -187,3 +188,4 @@ CELERY_TIMEZONE = "Africa/Lagos"
 # Email Configs
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 DEFAULT_FROM_EMAIL = "noreply@test.com"
+ADMIN_EMAIL = "admin@test.com"

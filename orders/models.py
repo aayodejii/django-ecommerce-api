@@ -124,6 +124,7 @@ class WebhookEvent(models.Model):
     payload = models.JSONField()
     processed = models.BooleanField(default=False)
     processed_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -131,3 +132,73 @@ class WebhookEvent(models.Model):
             models.Index(fields=["event_id"]),
             models.Index(fields=["processed"]),
         ]
+
+
+class DailySalesReport(models.Model):
+    date = models.DateField(unique=True)
+    total_orders = models.IntegerField(default=0)
+    total_revenue = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ("pending", "Pending"),
+            ("processing", "Processing"),
+            ("completed", "Completed"),
+            ("failed", "Failed"),
+        ],
+        default="pending",
+    )
+    generated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-date"]
+        indexes = [
+            models.Index(fields=["date"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self):
+        return f"Sales Report - {self.date}"
+
+
+class LowStockAlert(models.Model):
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name="stock_alerts"
+    )
+    stock_level = models.IntegerField()
+    alert_sent = models.BooleanField(default=False)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["alert_sent"]),
+            models.Index(fields=["created_at"]),
+        ]
+
+    def __str__(self):
+        return f"Low Stock Alert - {self.product.name} ({self.stock_level})"
+
+
+class WebhookCleanupLog(models.Model):
+    run_date = models.DateField(unique=True)
+    archived_count = models.IntegerField(default=0)
+    deleted_count = models.IntegerField(default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ("success", "Success"),
+            ("failed", "Failed"),
+        ],
+        default="success",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-run_date"]
+
+    def __str__(self):
+        return f"Cleanup Log - {self.run_date}"

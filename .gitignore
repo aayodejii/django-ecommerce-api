@@ -10,3 +10,6 @@ wheels/
 .venv
 
 db.sqlite3
+
+# celery beat
+celerybeat-schedule.*
