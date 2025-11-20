@@ -9,6 +9,7 @@ from orders.models import (
     DailySalesReport,
     LowStockAlert,
     WebhookCleanupLog,
+    FailedTask,
 )
 
 admin.site.register(Order)
@@ -61,6 +62,25 @@ class WebhookCleanupLogAdmin(admin.ModelAdmin):
         "deleted_count",
         "status",
         "created_at",
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(FailedTask)
+class FailedTaskAdmin(admin.ModelAdmin):
+    list_display = ["task_name", "task_id", "failed_at", "retried"]
+    list_filter = ["task_name", "retried", "failed_at"]
+    search_fields = ["task_id", "exception"]
+    readonly_fields = [
+        "task_name",
+        "task_id",
+        "args",
+        "kwargs",
+        "exception",
+        "traceback",
+        "failed_at",
     ]
 
     def has_add_permission(self, request):

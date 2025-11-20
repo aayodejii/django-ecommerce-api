@@ -24,4 +24,8 @@ app.conf.beat_schedule = {
         "task": "orders.tasks.generate_daily_sales_report",
         "schedule": crontab(hour=8, minute=0),
     },
+    "monitor-failed-tasks-hourly": {
+        "task": "orders.tasks.monitor_failed_tasks",
+        "schedule": crontab(minute=0),
+    },
 }

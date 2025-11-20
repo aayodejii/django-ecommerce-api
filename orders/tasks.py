@@ -1,7 +1,7 @@
 import logging
 from datetime import timedelta
 
-from celery import shared_task
+from celery import Task, shared_task
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import IntegrityError, models, transaction
@@ -17,13 +17,30 @@ from orders.models import (
     DailySalesReport,
     LowStockAlert,
     WebhookCleanupLog,
+    FailedTask,
 )
 
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=3)
+class CallbackTask(Task):
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        FailedTask.objects.create(
+            task_name=self.name,
+            task_id=task_id,
+            args=args,
+            kwargs=kwargs,
+            exception=str(exc),
+            traceback=str(einfo),
+        )
+
+        logger.error(f"Task {self.name} failed permanently: {exc}")
+
+        super().on_failure(exc, task_id, args, kwargs, einfo)
+
+
+@shared_task(bind=True, base=CallbackTask, max_retries=3)
 def send_order_confirmation_email(self, order_id):
     try:
         order = (
@@ -80,7 +97,7 @@ def send_order_confirmation_email(self, order_id):
         raise self.retry(exc=exc, countdown=2**self.request.retries)
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(bind=True, base=CallbackTask, max_retries=3)
 def process_payment_webhook(self, event_id, payment_reference, status, amount):
     try:
         with transaction.atomic():
@@ -142,7 +159,7 @@ def process_payment_webhook(self, event_id, payment_reference, status, amount):
         raise self.retry(exc=exc, countdown=2**self.request.retries)
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(bind=True, base=CallbackTask, max_retries=3)
 def check_low_stock(self):
     try:
         low_stock_threshold = 10
@@ -213,7 +230,7 @@ def check_low_stock(self):
         raise self.retry(exc=exc, countdown=300)
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(bind=True, base=CallbackTask, max_retries=3)
 def cleanup_old_webhooks(self):
     try:
         today = timezone.now().date()
@@ -264,7 +281,7 @@ def cleanup_old_webhooks(self):
         raise self.retry(exc=exc, countdown=3600)
 
 
-@shared_task(bind=True, max_retries=3)
+@shared_task(bind=True, base=CallbackTask, max_retries=3)
 def generate_daily_sales_report(self):
     try:
         today = timezone.now().date()
@@ -350,3 +367,38 @@ def generate_daily_sales_report(self):
 
         logger.error(f"Failed to generate sales report: {exc}")
         raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task
+def monitor_failed_tasks():
+    recent_failures = FailedTask.objects.filter(
+        failed_at__gte=timezone.now() - timedelta(hours=1), retried=False
+    )
+
+    if recent_failures.count() > 5:
+        failed_tasks_list = "\n".join(
+            [f"- {ft.task_name}: {ft.exception[:100]}" for ft in recent_failures[:10]]
+        )
+
+        message = f"""
+        ALERT: High Task Failure Rate
+
+        {recent_failures.count()} tasks have failed in the last hour:
+
+        {failed_tasks_list}
+
+        Please investigate immediately.
+        """
+
+        send_mail(
+            subject="ALERT: High Task Failure Rate",
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[settings.ADMIN_EMAIL],
+            fail_silently=False,
+        )
+
+        logger.warning(f"Alert sent: {recent_failures.count()} task failures")
+        return f"Alert sent for {recent_failures.count()} failures"
+
+    return "No alerts needed"

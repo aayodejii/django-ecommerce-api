@@ -202,3 +202,25 @@ class WebhookCleanupLog(models.Model):
 
     def __str__(self):
         return f"Cleanup Log - {self.run_date}"
+
+
+class FailedTask(models.Model):
+    task_name = models.CharField(max_length=255)
+    task_id = models.CharField(max_length=255, unique=True)
+    args = models.JSONField()
+    kwargs = models.JSONField()
+    exception = models.TextField()
+    traceback = models.TextField()
+    failed_at = models.DateTimeField(auto_now_add=True)
+    retried = models.BooleanField(default=False)
+    retried_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-failed_at"]
+        indexes = [
+            models.Index(fields=["task_name"]),
+            models.Index(fields=["retried"]),
+        ]
+
+    def __str__(self):
+        return f"{self.task_name} - {self.task_id}"
