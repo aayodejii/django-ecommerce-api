@@ -1,3 +1,4 @@
+import time
 import logging
 from datetime import timedelta
 
@@ -18,6 +19,13 @@ from orders.models import (
     LowStockAlert,
     WebhookCleanupLog,
     FailedTask,
+)
+from orders.metrics import (
+    payment_webhook_processed_total,
+    celery_task_duration,
+    celery_task_total,
+    active_orders_gauge,
+    low_stock_products_gauge,
 )
 
 
@@ -99,6 +107,8 @@ def send_order_confirmation_email(self, order_id):
 
 @shared_task(bind=True, base=CallbackTask, max_retries=3)
 def process_payment_webhook(self, event_id, payment_reference, status, amount):
+    start_time = time.time()
+
     try:
         with transaction.atomic():
             webhook_event, created = WebhookEvent.objects.get_or_create(
@@ -114,14 +124,14 @@ def process_payment_webhook(self, event_id, payment_reference, status, amount):
             )
 
             if not created and webhook_event.processed:
-                logger.info(f"Webhook event {event_id} already processed, skipping")
-                return f"Webhook event {event_id} already processed"
+                logger.info(f"Webhook {event_id} already processed, skipping")
+                payment_webhook_processed_total.labels(status="duplicate").inc()
+                return f"Webhook {event_id} already processed"
 
             try:
                 order = Order.objects.select_for_update().get(
                     payment_reference=payment_reference
                 )
-
             except Order.DoesNotExist:
                 logger.error(
                     f"Order with payment reference {payment_reference} not found"
@@ -129,34 +139,51 @@ def process_payment_webhook(self, event_id, payment_reference, status, amount):
                 webhook_event.processed = True
                 webhook_event.processed_at = timezone.now()
                 webhook_event.save()
+                payment_webhook_processed_total.labels(status="order_not_found").inc()
                 return f"Order not found for reference {payment_reference}"
 
             if status == "success":
                 if order.payment_status != Order.PAYMENT_PAID:
                     order.payment_status = Order.PAYMENT_PAID
                     order.status = Order.STATUS_CONFIRMED
-                    order.save(update_fields=["payment_status", "status"])
+                    order.save(update_fields=["payment_status", "status", "updated_at"])
                     logger.info(f"Order {order.id} marked as paid")
+                    payment_webhook_processed_total.labels(status="success").inc()
                 else:
                     logger.info(f"Order {order.id} already marked as paid")
+                    payment_webhook_processed_total.labels(status="already_paid").inc()
 
             elif status == "failed":
-                order.payment_status = Order.STATUS_PAYMENT_FAILED
+                order.payment_status = Order.PAYMENT_FAILED
                 order.status = Order.STATUS_FAILED
-                order.save(update_fields=["payment_status", "status"])
-                logger.warning(f"Order {order.id} marked as payment failed")
+                order.save(update_fields=["payment_status", "status", "updated_at"])
+                logger.info(f"Order {order.id} marked as failed")
+                payment_webhook_processed_total.labels(status="payment_failed").inc()
 
             webhook_event.processed = True
             webhook_event.processed_at = timezone.now()
             webhook_event.save()
 
-            return (
-                f"Processed webhook event {event_id} for order {order.id} successfully"
+            duration = time.time() - start_time
+            celery_task_duration.labels(task_name="process_payment_webhook").observe(
+                duration
             )
+            celery_task_total.labels(
+                task_name="process_payment_webhook", status="success"
+            ).inc()
+
+            return f"Webhook {event_id} processed successfully"
 
     except Exception as exc:
-        logger.error(f"Failed to process webhook event {event_id}: {exc}")
-        raise self.retry(exc=exc, countdown=2**self.request.retries)
+        duration = time.time() - start_time
+        celery_task_duration.labels(task_name="process_payment_webhook").observe(
+            duration
+        )
+        celery_task_total.labels(
+            task_name="process_payment_webhook", status="failed"
+        ).inc()
+        logger.error(f"Failed to process webhook {event_id}: {exc}")
+        raise self.retry(exc=exc, countdown=60 * (2**self.request.retries))
 
 
 @shared_task(bind=True, base=CallbackTask, max_retries=3)
@@ -402,3 +429,24 @@ def monitor_failed_tasks():
         return f"Alert sent for {recent_failures.count()} failures"
 
     return "No alerts needed"
+
+
+@shared_task
+def update_metric_gauges():
+    active_orders_count = Order.objects.filter(
+        status__in=[
+            Order.STATUS_PENDING,
+            Order.STATUS_CONFIRMED,
+            Order.STATUS_PROCESSING,
+        ]
+    ).count()
+
+    active_orders_gauge.set(active_orders_count)
+
+    low_stock_count = Product.objects.filter(
+        stock_quantity__lte=10, is_active=True
+    ).count()
+
+    low_stock_products_gauge.set(low_stock_count)
+
+    return f"Updated gauges: {active_orders_count} active orders, {low_stock_count} low stock"

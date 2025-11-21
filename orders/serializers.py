@@ -1,7 +1,5 @@
 import uuid
 
-# import logging
-
 from django.core.cache import cache
 from django.db import transaction
 from rest_framework import serializers
@@ -9,8 +7,13 @@ from rest_framework import serializers
 from orders.models import Order, OrderItem, Product
 from orders.tasks import send_order_confirmation_email
 from orders.utils.logging import logger
-
-# logger = logging.getLogger(__name__)
+from orders.metrics import (
+    orders_created_total,
+    order_value_total,
+    order_creation_duration,
+    redis_lock_acquisitions,
+    stock_quantity_gauge,
+)
 
 
 class OrderItemInputSerializer(serializers.Serializer):
@@ -104,7 +107,10 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 lock = cache.lock(lock_key, timeout=10, blocking_timeout=5)
 
                 acquired = lock.acquire(blocking=True)
-                if not acquired:
+                if acquired:
+                    redis_lock_acquisitions.labels(status="success").inc()
+                else:
+                    redis_lock_acquisitions.labels(status="failed").inc()
                     logger.warning(
                         "Failed to acquire lock",
                         extra={
@@ -156,6 +162,10 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     product.stock_quantity -= quantity
                     product.save(update_fields=["stock_quantity"])
 
+                    stock_quantity_gauge.labels(
+                        product_id=str(product.id), product_name=product.name
+                    ).set(product.stock_quantity)
+
                     OrderItem.objects.create(
                         order=order, product=product, quantity=quantity, price=price
                     )
@@ -164,9 +174,16 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 order.total = total
                 order.save(update_fields=["total"])
 
+                orders_created_total.labels(status=order.status).inc()
+                order_value_total.labels(payment_status=order.payment_status).inc(
+                    float(order.total)
+                )
+
                 send_order_confirmation_email.delay(str(order.id))
 
-                duration_ms = (time.time() - start_time) * 1000
+                duration = time.time() - start_time
+                order_creation_duration.observe(duration)
+
                 logger.info(
                     "Order created successfully",
                     extra={
@@ -175,7 +192,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                         "user_id": order.user.id,
                         "total": float(order.total),
                         "item_count": len(items_data),
-                        "duration_ms": round(duration_ms, 2),
+                        "duration_ms": round(duration * 1000, 2),
                         "action": "order_created",
                     },
                 )
@@ -183,26 +200,28 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                 return order
 
         except serializers.ValidationError:
-            duration_ms = (time.time() - start_time) * 1000
+            duration = time.time() - start_time
+            order_creation_duration.observe(duration)
             logger.info(
                 "Order creation validation failed",
                 extra={
                     "request_id": request_id,
-                    "duration_ms": round(duration_ms, 2),
+                    "duration_ms": round(duration * 1000, 2),
                     "action": "order_create_validation_failed",
                 },
             )
             raise
 
         except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000
+            duration = time.time() - start_time
+            order_creation_duration.observe(duration)
             logger.error(
                 "Order creation failed",
                 extra={
                     "request_id": request_id,
                     "error": str(e),
                     "error_type": type(e).__name__,
-                    "duration_ms": round(duration_ms, 2),
+                    "duration_ms": round(duration * 1000, 2),
                     "action": "order_create_failed",
                 },
             )

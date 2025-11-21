@@ -28,4 +28,8 @@ app.conf.beat_schedule = {
         "task": "orders.tasks.monitor_failed_tasks",
         "schedule": crontab(minute=0),
     },
+    "update-metrics-every-minute": {
+        "task": "orders.tasks.update_metric_gauges",
+        "schedule": 60.0,
+    },
 }
