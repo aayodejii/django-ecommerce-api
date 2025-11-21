@@ -1,5 +1,6 @@
 import uuid
-import logging
+
+# import logging
 
 from django.core.cache import cache
 from django.db import transaction
@@ -7,8 +8,9 @@ from rest_framework import serializers
 
 from orders.models import Order, OrderItem, Product
 from orders.tasks import send_order_confirmation_email
+from orders.utils.logging import logger
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
 
 class OrderItemInputSerializer(serializers.Serializer):
@@ -77,8 +79,22 @@ class OrderCreateSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
+        import time
+
+        start_time = time.time()
+        request_id = str(uuid.uuid4())
         items_data = validated_data.pop("items")
         product_ids = [item["product_id"] for item in items_data]
+
+        logger.info(
+            "Order creation started",
+            extra={
+                "request_id": request_id,
+                "user_id": validated_data["user"].id,
+                "product_count": len(items_data),
+                "action": "order_create_start",
+            },
+        )
 
         locks_acquired = []
 
@@ -89,6 +105,14 @@ class OrderCreateSerializer(serializers.ModelSerializer):
 
                 acquired = lock.acquire(blocking=True)
                 if not acquired:
+                    logger.warning(
+                        "Failed to acquire lock",
+                        extra={
+                            "request_id": request_id,
+                            "product_id": str(product_id),
+                            "action": "lock_failed",
+                        },
+                    )
                     raise serializers.ValidationError(
                         "Product is currently being ordered. Please try again."
                     )
@@ -102,6 +126,17 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     quantity = item_data["quantity"]
 
                     if product.stock_quantity < quantity:
+                        logger.warning(
+                            "Insufficient stock",
+                            extra={
+                                "request_id": request_id,
+                                "product_id": str(product.id),
+                                "product_name": product.name,
+                                "available": product.stock_quantity,
+                                "requested": quantity,
+                                "action": "stock_check_failed",
+                            },
+                        )
                         raise serializers.ValidationError(
                             f"Not enough stock for {product.name}. "
                             f"Available: {product.stock_quantity}, Requested: {quantity}"
@@ -119,7 +154,7 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     price = product.price
 
                     product.stock_quantity -= quantity
-                    product.save()
+                    product.save(update_fields=["stock_quantity"])
 
                     OrderItem.objects.create(
                         order=order, product=product, quantity=quantity, price=price
@@ -127,18 +162,65 @@ class OrderCreateSerializer(serializers.ModelSerializer):
                     total += price * quantity
 
                 order.total = total
-                order.save()
+                order.save(update_fields=["total"])
 
-                send_order_confirmation_email.delay(order.id)
+                send_order_confirmation_email.delay(str(order.id))
+
+                duration_ms = (time.time() - start_time) * 1000
+                logger.info(
+                    "Order created successfully",
+                    extra={
+                        "request_id": request_id,
+                        "order_id": str(order.id),
+                        "user_id": order.user.id,
+                        "total": float(order.total),
+                        "item_count": len(items_data),
+                        "duration_ms": round(duration_ms, 2),
+                        "action": "order_created",
+                    },
+                )
 
                 return order
+
+        except serializers.ValidationError:
+            duration_ms = (time.time() - start_time) * 1000
+            logger.info(
+                "Order creation validation failed",
+                extra={
+                    "request_id": request_id,
+                    "duration_ms": round(duration_ms, 2),
+                    "action": "order_create_validation_failed",
+                },
+            )
+            raise
+
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            logger.error(
+                "Order creation failed",
+                extra={
+                    "request_id": request_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "duration_ms": round(duration_ms, 2),
+                    "action": "order_create_failed",
+                },
+            )
+            raise
 
         finally:
             for lock in locks_acquired:
                 try:
                     lock.release()
                 except Exception as e:
-                    logger.error(f"Error releasing lock: {e}")
+                    logger.error(
+                        "Failed to release lock",
+                        extra={
+                            "request_id": request_id,
+                            "error": str(e),
+                            "action": "lock_release_failed",
+                        },
+                    )
 
 
 class ProductSerializer(serializers.ModelSerializer):

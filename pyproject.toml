@@ -13,4 +13,5 @@ dependencies = [
     "djangorestframework>=3.16.1",
     "djoser>=2.3.3",
     "flower>=2.0.1",
+    "python-json-logger>=4.0.0",
 ]
